@@ -7156,7 +7156,7 @@ function addNewCategory(p) {
   'use strict';
   const MAP_KEY = 'hamly-v5-remote-org-map';
   const SYNC_FLAG = '__hamlySupabaseSyncV1';
-  let ready = false, busy = false, remoteApplying = false, pushTimer = null, pollTimer = null;
+  let ready = false, busy = false, remoteApplying = false, conflictDetected = false, pushTimer = null, pollTimer = null;
   let lastRemoteStamp = '', lastLocalStamp = '';
   const getMap = () => { try { return JSON.parse(localStorage.getItem(MAP_KEY) || '{}'); } catch (_) { return {}; } };
   const setMap = (m) => localStorage.setItem(MAP_KEY, JSON.stringify(m));
@@ -7189,7 +7189,7 @@ function addNewCategory(p) {
     return JSON.stringify(copy);
   };
   async function syncPush() {
-    if (!ready || busy || remoteApplying || !remoteId()) return;
+    if (!ready || busy || remoteApplying || conflictDetected || !remoteId()) return;
     busy = true;
     try {
       const payload = localPayload();
@@ -7226,6 +7226,12 @@ function addNewCategory(p) {
       const payload = Object.assign({}, record.value || {}, { _orgId: currentOrgId || 'default_org' });
       const local = localPayload();
       const localStamp = fingerprint(local);
+      if (remoteStamp && remoteStamp !== lastRemoteStamp && lastLocalStamp && localStamp !== lastLocalStamp && fingerprint(payload) !== localStamp) {
+        conflictDetected = true;
+        if (typeof showCustomToast === 'function') showCustomToast('Shared inventory changed on another computer while you had local edits. To prevent data loss, syncing is paused. Copy/save your work, then refresh this page.', 'danger');
+        console.warn('[Hamly shared inventory] conflict detected; automatic sync paused to avoid overwriting edits.');
+        return;
+      }
       if (remoteStamp && remoteStamp !== lastRemoteStamp && fingerprint(payload) !== localStamp) {
         remoteApplying = true;
         localStorage.setItem(dataKey(), JSON.stringify(payload));

@@ -7205,6 +7205,12 @@ function addNewCategory(p) {
       const result = await db('records-list', { orgId: remoteId() });
       const record = (result.records || []).find(r => r.key === 'inventory');
       if (!record) {
+        // Only the global Admin may seed a brand-new shared inventory record.
+        // A newly invited User must never seed the shared org from an empty/stale browser.
+        if (!currentUser || currentUser.role !== 'Admin') {
+          showCustomToast('Shared inventory is not initialized yet. Ask your Admin to open this organization first.', 'info');
+          return;
+        }
         const payload = localPayload();
         await db('records-upsert', { orgId: remoteId(), key: 'inventory', value: payload });
         lastLocalStamp = fingerprint(payload);

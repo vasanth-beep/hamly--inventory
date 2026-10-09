@@ -2,6 +2,9 @@
 
 This branch is a test candidate only. It is not merged into `main`; do not publish it to production until the checklist below passes.
 
+## Critical isolation rule before testing
+Use a separate Supabase staging project/database and separate Netlify staging site for the Deploy Preview. Do not point preview code at the same database used by production: the first Admin session can initialize a missing remote inventory record from the browser's current local data, and a preview may have different/empty browser storage. Do not test against production data until backup and migration/initialization are explicitly reviewed.
+
 ## Required Netlify setup
 - Keep `DATABASE_URL` in Netlify environment variables only. Never paste it into HTML, GitHub, or chat.
 - Ensure Netlify production/deploy-preview builds install dependencies from `package.json` (`pg` is required).

@@ -7149,6 +7149,190 @@ function addNewCategory(p) {
   showCustomToast('Category "' + name + '" created and selected', 'success');
 }
 </script>
+
+<script>
+/* HAMLY_SUPABASE_SYNC_V1 — staged shared inventory sync. Never expose DATABASE_URL here. */
+(function () {
+  'use strict';
+  const MAP_KEY = 'hamly-v5-remote-org-map';
+  const SYNC_FLAG = '__hamlySupabaseSyncV1';
+  let ready = false, busy = false, remoteApplying = false, conflictDetected = false, pushTimer = null, pollTimer = null;
+  let lastRemoteStamp = '', lastLocalStamp = '';
+  const getMap = () => { try { return JSON.parse(localStorage.getItem(MAP_KEY) || '{}'); } catch (_) { return {}; } };
+  const setMap = (m) => localStorage.setItem(MAP_KEY, JSON.stringify(m));
+  const authToken = () => (typeof currentUser !== 'undefined' && currentUser) ? currentUser.token : '';
+  async function db(action, body) {
+    const token = authToken();
+    if (!token) throw new Error('Please sign in before syncing.');
+    const res = await fetch('/db/' + action, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + token },
+      body: JSON.stringify(body || {})
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || ('Database request failed (' + res.status + ')'));
+    return data;
+  }
+  const activeOrg = () => (typeof orgDetailsList !== 'undefined' ? orgDetailsList.find(o => o.id === currentOrgId) : null);
+  const remoteId = () => getMap()[currentOrgId] || (String(currentOrgId || '').startsWith('shared_') ? String(currentOrgId).slice(7) : '');
+  const dataKey = () => 'hamly-v5-data-' + (currentOrgId || 'default_org');
+  function localPayload() {
+    const raw = localStorage.getItem(dataKey());
+    if (raw) { try { return JSON.parse(raw); } catch (_) {} }
+    return { _orgId: currentOrgId || 'default_org', items: [], stockIn: [], issues: [], returns: [], disposedItems: [], disposedStockIn: [], disposedIssues: [], disposedReturns: [], periodFileMap: {}, periodItemOpening: {}, periodAttachments: {}, activityLog: [], seenCounts: { disposalTotal: 0, disposal: { items: 0, stockin: 0, issue: 0, return: 0 }, history: {} } };
+  }
+  // Local organization IDs differ per browser; ignore this bookkeeping field for shared-data comparisons.
+  const fingerprint = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return JSON.stringify(value);
+    const copy = Object.assign({}, value);
+    delete copy._orgId;
+    return JSON.stringify(copy);
+  };
+  async function syncPush() {
+    if (!ready || busy || remoteApplying || conflictDetected || !remoteId()) return;
+    busy = true;
+    try {
+      const payload = localPayload();
+      const stamp = fingerprint(payload);
+      if (stamp === lastLocalStamp) return;
+      await db('records-upsert', { orgId: remoteId(), key: 'inventory', value: payload });
+      lastLocalStamp = stamp;
+    } finally { busy = false; }
+  }
+  function schedulePush() {
+    if (!ready || remoteApplying) return;
+    clearTimeout(pushTimer);
+    pushTimer = setTimeout(() => syncPush().catch(e => console.warn('[Hamly shared inventory]', e.message)), 700);
+  }
+  async function syncPull() {
+    if (!ready || busy || !remoteId()) return;
+    busy = true;
+    try {
+      const result = await db('records-list', { orgId: remoteId() });
+      const record = (result.records || []).find(r => r.key === 'inventory');
+      if (!record) {
+        // Only the global Admin may seed a brand-new shared inventory record.
+        // A newly invited User must never seed the shared org from an empty/stale browser.
+        if (!currentUser || currentUser.role !== 'Admin') {
+          showCustomToast('Shared inventory is not initialized yet. Ask your Admin to open this organization first.', 'info');
+          return;
+        }
+        const payload = localPayload();
+        await db('records-upsert', { orgId: remoteId(), key: 'inventory', value: payload });
+        lastLocalStamp = fingerprint(payload);
+        return;
+      }
+      const remoteStamp = String(record.updatedAt || '');
+      const payload = Object.assign({}, record.value || {}, { _orgId: currentOrgId || 'default_org' });
+      const local = localPayload();
+      const localStamp = fingerprint(local);
+      if (remoteStamp && remoteStamp !== lastRemoteStamp && lastLocalStamp && localStamp !== lastLocalStamp && fingerprint(payload) !== localStamp) {
+        conflictDetected = true;
+        if (typeof showCustomToast === 'function') showCustomToast('Shared inventory changed on another computer while you had local edits. To prevent data loss, syncing is paused. Copy/save your work, then refresh this page.', 'danger');
+        console.warn('[Hamly shared inventory] conflict detected; automatic sync paused to avoid overwriting edits.');
+        return;
+      }
+      if (remoteStamp && remoteStamp !== lastRemoteStamp && fingerprint(payload) !== localStamp) {
+        remoteApplying = true;
+        localStorage.setItem(dataKey(), JSON.stringify(payload));
+        if (typeof loadData === 'function') loadData();
+        lastRemoteStamp = remoteStamp;
+        lastLocalStamp = fingerprint(payload);
+        // Refresh the active screen only when the user is not typing in a form.
+        const el = document.activeElement;
+        const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT');
+        if (!typing && typeof renderItems === 'function') { try { renderItems(); } catch (_) {} }
+        if (!typing && typeof renderStockIn === 'function') { try { renderStockIn(); } catch (_) {} }
+        if (!typing && typeof renderIssues === 'function') { try { renderIssues(); } catch (_) {} }
+        if (!typing && typeof renderReturns === 'function') { try { renderReturns(); } catch (_) {} }
+        remoteApplying = false;
+      } else if (!lastRemoteStamp) {
+        lastRemoteStamp = remoteStamp;
+        lastLocalStamp = localStamp;
+      }
+    } finally { remoteApplying = false; busy = false; }
+  }
+  async function initialize() {
+    if (ready || !authToken()) return;
+    ready = false;
+    try {
+      let orgs = (await db('orgs-list', {})).organizations || [];
+      if (currentUser && currentUser.role === 'Admin') {
+        // Admin creates/matches each local organization remotely; users must be explicitly added.
+        for (const org of (orgDetailsList || [])) {
+          const result = await db('orgs-create', { name: org.name });
+          const map = getMap(); map[org.id] = result.organization.id; setMap(map);
+        }
+        orgs = (await db('orgs-list', {})).organizations || [];
+      } else {
+        // A User sees only organizations to which an Admin has granted membership.
+        if (!orgs.length) {
+          ready = false;
+          if (typeof showCustomToast === 'function') showCustomToast('Your Admin must share an organization with your username before inventory sync can start.', 'info');
+          return;
+        }
+        const previous = (orgDetailsList || []).find(o => o.id === currentOrgId);
+        const previousName = previous && previous.name;
+        const oldByName = new Map((orgDetailsList || []).map(o => [String(o.name || '').toLowerCase(), o]));
+        orgDetailsList = orgs.map(o => {
+          const old = oldByName.get(String(o.name || '').toLowerCase()) || {};
+          return Object.assign({}, old, { id: 'shared_' + o.id, name: o.name, _remoteRole: o.role });
+        });
+        const chosen = orgDetailsList.find(o => o.name === previousName) || orgDetailsList[0];
+        currentOrgId = chosen.id;
+        const map = getMap(); orgs.forEach(o => { map['shared_' + o.id] = o.id; }); setMap(map);
+        if (typeof saveSettings === 'function') saveSettings();
+        if (typeof updateOrgUI === 'function') updateOrgUI();
+        // Clear any previously loaded local-org data before touching shared records.
+        if (typeof loadData === 'function') loadData();
+      }
+      ready = true;
+      await syncPull();
+      // Add an explicit membership control for Admins; membership is never granted automatically.
+      if (currentUser && currentUser.role === 'Admin' && !document.getElementById('hamly-share-org-btn')) {
+        const b = document.createElement('button');
+        b.id = 'hamly-share-org-btn';
+        b.type = 'button';
+        b.textContent = 'Share Organization';
+        b.title = 'Grant an existing Hamly user access to this organization';
+        b.style.cssText = 'position:fixed;right:18px;bottom:24px;z-index:9999;padding:10px 14px;border:0;border-radius:12px;background:#6d28d9;color:white;font-weight:700;box-shadow:0 6px 22px #6d28d955;cursor:pointer';
+        b.addEventListener('click', async () => {
+          const org = activeOrg();
+          const id = remoteId();
+          if (!org || !id) { showCustomToast('Select an organization first.', 'danger'); return; }
+          const username = window.prompt('Enter the exact username of the existing Hamly User to share "' + org.name + '" with:');
+          if (!username || !username.trim()) return;
+          try {
+            const r = await db('orgs-add-member', { orgId: id, username: username.trim(), role: 'User' });
+            showCustomToast('Organization shared with ' + r.username + '. They can sign in and access this organization.', 'success');
+          } catch (e) { showCustomToast(e.message, 'danger'); }
+        });
+        document.body.appendChild(b);
+      }
+      pollTimer = setInterval(() => syncPull().catch(e => console.warn('[Hamly shared inventory]', e.message)), 8000);
+      console.info('[Hamly shared inventory] connected for organization:', activeOrg() && activeOrg().name);
+    } catch (e) {
+      ready = false;
+      console.error('[Hamly shared inventory] setup failed:', e.message);
+      if (typeof showCustomToast === 'function') showCustomToast('Shared inventory setup failed: ' + e.message, 'danger');
+    }
+  }
+  // Preserve existing save/load logic and UI; sync is an additional layer.
+  const originalSaveData = typeof saveData === 'function' ? saveData : null;
+  if (originalSaveData) {
+    saveData = function () {
+      const result = originalSaveData.apply(this, arguments);
+      schedulePush();
+      return result;
+    };
+  }
+  // Detect login without changing the existing authentication workflow.
+  setInterval(() => { if (!ready && authToken()) initialize(); }, 2000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && ready) syncPull().catch(e => console.warn(e.message)); });
+  window.addEventListener('beforeunload', () => { if (pollTimer) clearInterval(pollTimer); });
+})();
+</script>
+
 <div id="hamly-build-tag" style="position:fixed;right:8px;bottom:4px;font:10px/1 monospace;opacity:.45;z-index:5;pointer-events:none;color:#9aa4c7">build 2026-10-09 · stock-guard ON</div>
 </body>
 </html>

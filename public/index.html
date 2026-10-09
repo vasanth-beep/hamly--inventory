@@ -7181,7 +7181,13 @@ function addNewCategory(p) {
     if (raw) { try { return JSON.parse(raw); } catch (_) {} }
     return { _orgId: currentOrgId || 'default_org', items: [], stockIn: [], issues: [], returns: [], disposedItems: [], disposedStockIn: [], disposedIssues: [], disposedReturns: [], periodFileMap: {}, periodItemOpening: {}, periodAttachments: {}, activityLog: [], seenCounts: { disposalTotal: 0, disposal: { items: 0, stockin: 0, issue: 0, return: 0 }, history: {} } };
   }
-  const fingerprint = value => JSON.stringify(value);
+  // Local organization IDs differ per browser; ignore this bookkeeping field for shared-data comparisons.
+  const fingerprint = value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return JSON.stringify(value);
+    const copy = Object.assign({}, value);
+    delete copy._orgId;
+    return JSON.stringify(copy);
+  };
   async function syncPush() {
     if (!ready || busy || remoteApplying || !remoteId()) return;
     busy = true;
@@ -7217,7 +7223,7 @@ function addNewCategory(p) {
         return;
       }
       const remoteStamp = String(record.updatedAt || '');
-      const payload = record.value;
+      const payload = Object.assign({}, record.value || {}, { _orgId: currentOrgId || 'default_org' });
       const local = localPayload();
       const localStamp = fingerprint(local);
       if (remoteStamp && remoteStamp !== lastRemoteStamp && fingerprint(payload) !== localStamp) {

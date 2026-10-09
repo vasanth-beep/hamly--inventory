@@ -7242,7 +7242,7 @@ function addNewCategory(p) {
   }
   async function initialize() {
     if (ready || !authToken()) return;
-    ready = true;
+    ready = false;
     try {
       let orgs = (await db('orgs-list', {})).organizations || [];
       if (currentUser && currentUser.role === 'Admin') {
@@ -7271,6 +7271,8 @@ function addNewCategory(p) {
         const map = getMap(); orgs.forEach(o => { map['shared_' + o.id] = o.id; }); setMap(map);
         if (typeof saveSettings === 'function') saveSettings();
         if (typeof updateOrgUI === 'function') updateOrgUI();
+        // Clear any previously loaded local-org data before touching shared records.
+        if (typeof loadData === 'function') loadData();
       }
       ready = true;
       await syncPull();
